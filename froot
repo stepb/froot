@@ -1,0 +1,313 @@
+#!/bin/bash
+#
+# Froot -- A fake-root management util
+#
+# Copyright (c) 2010 stepb <mail4stb@gmail.com>
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of the GNU Library General Public License as published
+# by the Free Software Foundation; either version 2, or (at your option)
+# any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+NAME="froot"
+VERSION="0.1_prototype"
+
+
+###################################
+### General functions           ###
+###################################
+
+usage() {
+    echo "froot (-i | pullin)"
+    echo "froot (-o | pushout) [--no-prompt]"
+    echo "froot diff"
+    echo "froot status"
+    echo "froot add"
+    echo "froot clean"
+    echo
+    echo "See http://github.com/stepb/froot for usage instructions."
+    return 0
+}
+
+#
+# Lifted (almost) verbatim from Yaourt (except stripped out i18n)
+#
+# Check if sudo is allowed for given command
+is_sudo_allowed()
+{
+	if (( SUDOINSTALLED )); then
+		sudo -nl "$@" &> /dev/null || \
+			(sudo -v && sudo -l "$@") &>/dev/null && return 0
+	fi
+	return 1
+}
+launch_with_su(){
+	#msg "try to launch '${@}' with sudo"
+	command=$1
+	if is_sudo_allowed "$@"; then
+		#echo "Allowed to use sudo $command"
+		sudo "$@" || return 1
+	else
+		(( $UID )) && echo -e "You are not allowed to launch $command with sudo\nPlease enter root password" 1>&2
+		errorfile="/tmp/froot_error.$RANDOM"
+		for i in 1 2 3; do 
+			su --shell=/bin/bash --command "$* || touch $errorfile"
+			(( $? )) && [[ ! -f "$errorfile" ]] && continue
+			[ -f "$errorfile" ] && return 1 || return 0
+		done
+		return 1
+	fi
+}
+
+###################################
+### Main Program Functions      ###
+###################################
+
+## Assumes file doesn't exist
+# usage: absolute_file_path
+can_create_file() {
+    local dir="$(dirname "$1")"
+    if [ -e "$dir" ]; then
+        [ -w "$dir" ] && return 0
+    else
+        can_create_file "$dir"
+        return $?
+    fi
+    return 1
+}
+
+# usage: suggest_su check_only
+froot_diff() {
+    suggest_su=$1
+    check_only=$2
+    (( COLORDIFFINSTALLED )) && diffpgm=colordiff || diffpgm=diff
+    diffargs='-aur'
+    NEW_FILES=""
+    MOD_FILES=""
+    DO_SU_FILES=""
+    DIFF_OUT=""
+    for file in $MFILES; do
+        [ -e "$file" ] && \
+            if [ -e "/$file" ]; then
+                if ! cmp -s "$file" "/$file"; then
+                    (( suggest_su )) && [ ! -w "/$file" ] && DO_SU=1 && DO_SU_FILES="$DO_SU_FILES/$file\n"
+                    MOD_FILES="$MOD_FILES$file\n"
+                    (( check_only )) || DIFF_OUT="$([ "$DIFF_OUT" ] && echo "$DIFF_OUT"; $diffpgm $diffargs "/$file" "$file")"
+                fi
+            else
+                (( suggest_su )) && ! can_create_file "/$file" && DO_SU=1 && DO_SU_FILES="$DO_SU_FILES/$file\n"
+                NEW_FILES="$NEW_FILES$file\n"
+                (( check_only )) || DIFF_OUT="$([ "$DIFF_OUT" ] && echo "$DIFF_OUT"; echo -e "\e[1;32m+++ /$file\e[0m")"
+            fi
+    done
+    [ "$NEW_FILES" ] && NEW_FILES="$(echo -en "$NEW_FILES" | sort)"
+    [ "$MOD_FILES" ] && MOD_FILES="$(echo -en "$MOD_FILES" | sort)"
+    [ "$DO_SU_FILES" ] && DO_SU_FILES="$(echo -en "$DO_SU_FILES" | sort)"
+}
+
+check_sys() {
+    SYS_NEW_FILES=""
+    SYS_MOD_FILES=""
+    for file in $MFILES; do
+        [ -e "/$file" ] && \
+            if [ -e "$file" ]; then
+                [ "/$file" -nt "$file" ] && ! cmp -s "/$file" "$file" && \
+                    SYS_MOD_FILES="$SYS_MOD_FILES/$file\n"
+            else
+                SYS_NEW_FILES="$SYS_NEW_FILES/$file\n"
+            fi
+    done
+    [ "$SYS_NEW_FILES" ] && SYS_NEW_FILES="$(echo -en "$SYS_NEW_FILES" | sort)"
+    [ "$SYS_MOD_FILES" ] && SYS_MOD_FILES="$(echo -en "$SYS_MOD_FILES" | sort)"
+}
+
+# note: assumes check_sys already called
+find_unmanaged_and_notfound() {
+   ## Find all files in fake-root which arn't ignored
+    fake_root_files="$(find -not -type d -o \( $SCM_PATHS \) -prune |
+        grep -xv "$(find -maxdepth 1)" | sed 's/^\.\///')"
+
+    UNMANAGED_FILES="$(echo "$fake_root_files" | grep -xv "$MFILES")"
+
+    NOTFOUND_FILES="$(echo "$MFILES" | grep -xv -e "$fake_root_files" -e "${SYS_NEW_FILES:1}" | sed 's/^/\//')"
+
+    [ "$UNMANAGED_FILES" ] && UNMANAGED_FILES="$(echo -en "$UNMANAGED_FILES" | sort)"
+    [ "$NOTFOUND_FILES" ] && NOTFOUND_FILES="$(echo -en "$NOTFOUND_FILES" | sort)"
+}
+
+pullin() {
+    check_sys
+    [ "$SYS_NEW_FILES" ] && echo "$SYS_NEW_FILES" | cpio -admvpu . 2>&1 | grep "^\." | sed 's/.\///'
+    [ "$SYS_MOD_FILES" ] && echo "$SYS_MOD_FILES" | cpio -admvpu . 2>&1 | grep "^\." | sed 's/.\///'
+    [ ! "$SYS_NEW_FILES$SYS_MOD_FILES" ] && echo " Nothing to pullin, everything up to date!"
+}
+
+# usage: no_prompt running_as_su
+pushout() {
+    froot_diff 1 $1
+
+    [ ! "$NEW_FILES$MOD_FILES" ] && echo " Nothing to pushout, everything up to date!" && exit 1
+
+    if (( ! $1 )); then
+        DIFF_OUT="$(echo -e " \e[1mPlease review the configuration changes:\e[0m\n"; echo "$DIFF_OUT")"
+        echo "$DIFF_OUT" | less
+        echo -n "Continue applying changes ? [y/n] : "
+        local answer
+        read answer
+        [ "${answer^^}" != "Y" ] && exit 1
+    fi
+
+    if (( DO_SU )); then
+        if (( $2 )); then
+            echo "You do not have correct privileges to write to:"
+            echo "$DO_SU_FILES" | sort | sed 's/^/\t/'
+            exit 1
+        fi
+        launch_with_su "$0" pushout 1 1
+        exit $?
+    fi
+    
+    for file in $NEW_FILES $MOD_FILES; do
+        local lsout=
+        local user=
+        local group=
+        if [ -e "/$file" ]; then
+            lsout="$(ls -l "/$file")"
+            user="$(echo "$lsout" | cut -d' ' -f3)"
+            group="$(echo "$lsout" | cut -d' ' -f4)"
+        fi
+
+        if echo "$file" | cpio -admvpu "/." 2>&1 | grep "^/" | sed 's/^\/.//'
+        then
+            if [ ! $user ]; then
+               ## Get the user and group from the parent dir
+                lsout="$(ls -ld "$(dirname "/$file")")"
+                user="$(echo "$lsout" | cut -d' ' -f3)"
+                group="$(echo "$lsout" | cut -d' ' -f4)"
+            fi
+            chown $user:$group "/$file"
+        fi
+    done
+}
+
+# usage: new_files modified_files
+print_new_and_modified() {
+    [ "$1" ] && echo "$1" | sed 's/^/\tnew:       /'
+    [ "$1" ] && [ "$2" ] && echo
+    [ "$2" ] && echo "$2" | sed 's/^/\tmodified:  /'
+}
+
+status() {
+    froot_diff 0 1
+    check_sys
+    find_unmanaged_and_notfound
+
+    if [ "$NEW_FILES$MOD_FILES" ]; then
+        is_output=1
+        echo " New or modified in fake-root:"
+        echo "   (use \"froot pushout\" to push out to your system)"
+        echo
+        print_new_and_modified "$NEW_FILES" "$MOD_FILES"
+    fi
+    if [ "$SYS_NEW_FILES$SYS_MOD_FILES" ]; then
+        (( is_output )) && echo
+        is_output=1
+        echo " New or modified on your system:"
+        echo "   (use \"froot pullin\" to pull into fake-root)"
+        echo
+        print_new_and_modified "$SYS_NEW_FILES" "$SYS_MOD_FILES"
+    fi
+    if [ "$UNMANAGED_FILES" ]; then
+        (( is_output )) && echo
+        is_output=1
+        echo " Unmanaged in fake-root:"
+        echo "   (use \"froot add\" to manage these files)"
+        echo
+        echo "$UNMANAGED_FILES" | sed 's/^/\t/'
+    fi
+    if [ "$NOTFOUND_FILES" ]; then
+        (( is_output )) && echo
+        is_output=1
+        echo " Managed but not found:"
+        echo "   (use \"froot clean\" to unmanage these files)"
+        echo
+        echo "$NOTFOUND_FILES" | sed 's/^/\t/'
+    fi
+
+    (( ! is_output )) && echo " Everything up to date!"
+}
+
+add() {
+    check_sys
+    find_unmanaged_and_notfound
+
+    [ ! "$UNMANAGED_FILES" ] && echo " Nothing to add!" && exit 1
+
+    echo " Adding unmanaged files:"
+    echo "$UNMANAGED_FILES" | sed 's/^/\t/'
+    echo -e "$UNMANAGED_FILES\n$MFILES" | sed 's/^/\//' | sort > $FROOT_FILE
+}
+
+clean() {
+    check_sys
+    find_unmanaged_and_notfound
+
+    [ ! "$NOTFOUND_FILES" ] && echo " Nothing to clean!" && exit 1
+
+    echo " Cleaning unknown files from .froot"
+    echo "$NOTFOUND_FILES" | sed 's/^/\t/'
+    echo "$MFILES" | sed 's/^/\//' | grep -xv "$NOTFOUND_FILES" > $FROOT_FILE
+}
+
+
+###################################
+### MAIN PROGRAM                ###
+###################################
+# Basic init
+FROOT_FILE=".froot"
+# For ignoring SCMs (lifted from emacs rgrep command)
+SCM_PATHS='-path */SCCS -o -path */RCS -o -path */CVS -o -path */MCVS -o -path */.svn -o -path */.git -o -path */.hg -o -path */.bzr -o -path */_MTN -o -path */_darcs -o -path */{arch}'
+
+# Grab environement options
+{
+    type -p sudo && SUDOINSTALLED=1
+    type -p colordiff && COLORDIFFINSTALLED=1
+    type -p cpio || { echo "froot: Requires cpio"; exit 1; }
+} &> /dev/null
+
+# Check existence of froot file
+[ ! -e "$FROOT_FILE" ] && {
+    echo "froot: Could not find: $FROOT_FILE"; exit 1; }
+# Check all paths are absolute
+grep -v -e "^/" -e "^[[:space:]]*$" "$FROOT_FILE" && {
+    echo "froot: Please only specify absolute paths in your $FROOT_FILE file";
+    exit 1; }
+# Now store it in a var with leading '/' removed
+MFILES="$(sed 's/^\///' "$FROOT_FILE" | grep -v "^[[:space:]]*$")"
+
+case "$1" in
+    -i | pullin ) pullin;;
+    -o | pushout )
+        no_prompt=0
+        [ "$2" == "--no-prompt" ] || [ "$2" == "1" ] && no_prompt=1
+        running_as_su=0
+        [ "$3" == "1" ] && running_as_su=1
+        pushout $no_prompt $running_as_su;;
+    diff ) froot_diff 0 0
+        echo "$DIFF_OUT" | less;;
+    status ) status;;
+    add ) add;;
+    clean ) clean;;
+    * ) usage;;
+esac
+
+exit 0
