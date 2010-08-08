@@ -133,7 +133,7 @@ check_sys() {
 # note: assumes check_sys already called
 find_unmanaged_and_notfound() {
    ## Find all files in fake-root which arn't ignored
-    fake_root_files="$(find -not -type d -o \( $SCM_PATHS \) -prune |
+   fake_root_files="$(find -not -type d -not \( $IGNORE_NAMES \) -o \( $IGNORE_PATHS \) -prune |
         grep -xv "$(find -maxdepth 1)" | sed 's/^\.\///')"
 
     UNMANAGED_FILES="$(echo "$fake_root_files" | grep -xv "$MFILES")"
@@ -275,7 +275,9 @@ clean() {
 # Basic init
 FROOT_FILE=".froot"
 # For ignoring SCMs (lifted from emacs rgrep command)
-SCM_PATHS='-path */SCCS -o -path */RCS -o -path */CVS -o -path */MCVS -o -path */.svn -o -path */.git -o -path */.hg -o -path */.bzr -o -path */_MTN -o -path */_darcs -o -path */{arch}'
+IGNORE_PATHS='-path */SCCS -o -path */RCS -o -path */CVS -o -path */MCVS -o -path */.svn -o -path */.git -o -path */.hg -o -path */.bzr -o -path */_MTN -o -path */_darcs -o -path */{arch}'
+# For ignoring temporary files created by our favourite editor
+IGNORE_NAMES='-name .*.swp'
 
 # Grab environement options
 {
