@@ -159,7 +159,7 @@ pushout() {
 
     if (( ! $1 )); then
         DIFF_OUT="$(echo -e " \e[1mPlease review the configuration changes:\e[0m\n"; echo "$DIFF_OUT")"
-        echo "$DIFF_OUT" | less
+        echo "$DIFF_OUT" | less -R
         echo -n "Continue applying changes ? [y/n] : "
         local answer
         read answer
@@ -305,7 +305,7 @@ case "$1" in
         [ "$3" == "1" ] && running_as_su=1
         pushout $no_prompt $running_as_su;;
     diff ) froot_diff 0 0
-        echo "$DIFF_OUT" | less;;
+        echo "$DIFF_OUT" | less -R;;
     status ) status;;
     add ) add;;
     clean ) clean;;
